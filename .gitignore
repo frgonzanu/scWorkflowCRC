@@ -1,0 +1,26 @@
+# Generated metadata
+config/samples.tsv
+config/accessions.full.tsv
+
+# Snakemake
+.snakemake/
+
+# Downloaded / generated biological data
+data/
+resources/reference/
+
+# Results
+results/
+
+# Lock files are generated deliberately and should be reviewed before commit.
+# Remove this line if you want Git to track them immediately.
+locks/
+
+# Local environments / editors
+.conda/
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

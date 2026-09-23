@@ -1,0 +1,43 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+type: object
+properties:
+  sample:
+    type: string
+    pattern: "^[SED]RR[0-9]+$"
+  protocol:
+    type: string
+    enum: [tang, smartseq2]
+  layout:
+    type: string
+    enum: [PAIRED, SINGLE]
+  r1_url:
+    type: string
+    pattern: "^https://"
+  r1_md5:
+    type: string
+    pattern: "^[0-9a-fA-F]{32}$"
+  r2_url:
+    type: string
+  r2_md5:
+    type: string
+required:
+  - sample
+  - protocol
+  - layout
+  - r1_url
+  - r1_md5
+  - r2_url
+  - r2_md5
+allOf:
+  - if:
+      properties:
+        layout:
+          const: PAIRED
+    then:
+      properties:
+        r2_url:
+          type: string
+          pattern: "^https://"
+        r2_md5:
+          type: string
+          pattern: "^[0-9a-fA-F]{32}$"

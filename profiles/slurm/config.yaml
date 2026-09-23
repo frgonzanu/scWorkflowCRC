@@ -1,0 +1,20 @@
+executor: slurm
+software-deployment-method: conda
+jobs: 50
+latency-wait: 60
+printshellcmds: true
+show-failed-logs: true
+
+default-resources:
+  mem_mb: 4000
+  runtime: 60
+  slurm_account: "CHANGE_ME"
+  slurm_partition: "CHANGE_ME"
+
+set-resources:
+  star_index:
+    mem_mb: 55000
+    runtime: 240
+  star_align:
+    mem_mb: 40000
+    runtime: 180
