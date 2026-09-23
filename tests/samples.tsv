@@ -1,0 +1,2 @@
+sample	protocol	layout	r1_url	r1_md5	r2_url	r2_md5
+SRR0000001	tang	PAIRED	https://example.org/SRR0000001_1.fastq.gz	00000000000000000000000000000000	https://example.org/SRR0000001_2.fastq.gz	11111111111111111111111111111111

@@ -1,0 +1,60 @@
+samplesheet: config/samples.tsv
+
+reference:
+  fasta_url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_38/GRCh38.primary_assembly.genome.fa.gz
+  gtf_url: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_38/gencode.v38.annotation.gtf.gz
+
+cutadapt:
+  times: 1
+  quality_cutoff: "20,20"
+  error_rate: 0.2
+  overlap: 5
+  minimum_length: 25
+
+  tang:
+    adapters: >-
+      -b AGATCGGAAGAGC
+      -B AGATCGGAAGAGC
+      -g ATATCTCGAGGGCGCGCCGGATCCATAT
+      -g ATATGGATCCGGCGCGCCGTCGACATAT
+      -g ATATGGATCCGGCGCGCCCTCGAGATAT
+      -g ATATGGATCCGGCGCGCCGTCGAGATAT
+      -g ATATCTCGAGGGCGCGCCGGATCC
+      -g ATATGGATCCGGCGCGCCGTCGAC
+      -g ATATGGATCCGGCGCGCCCTCGAG
+      -G ATATCTCGAGGGCGCGCCGGATCCATAT
+      -G ATATGGATCCGGCGCGCCGTCGACATAT
+      -G ATATGGATCCGGCGCGCCCTCGAGATAT
+      -G ATATGGATCCGGCGCGCCGTCGAGATAT
+      -G ATATCTCGAGGGCGCGCCGGATCC
+      -G ATATGGATCCGGCGCGCCGTCGAC
+      -G ATATGGATCCGGCGCGCCCTCGAG
+      -g T{20}
+      -G T{20}
+      -a A{20}
+      -A A{20}
+      -b AGATCGGAAGAGCACACGTCTGAACTCCAGTCACGAGCGCATCTCGTATGCCGTCTT
+      -B AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGTAGATCTCGGTGGTCGCCGTATCATT
+      -b ACACGTCTGAACTCCAGTCACGAGCGCATCTCGTATGCCGTCTTCTGCTT
+
+  smartseq2:
+    adapters: >-
+      -b AGATCGGAAGAGC
+      -B AGATCGGAAGAGC
+      -g AAGCAGTGGTATCAACGCAGAGTACATGGGAAGCAGTGGTATCAACGCAGAGTACATGGG
+      -g AAGCAGTGGTATCAACGCAGAGTACATGGG
+      -g AAGCAGTGGTATCAACGCAGAGCACACGTCTGAACTCCAGTCAC
+      -G AAGCAGTGGTATCAACGCAGAGCACACGTCTGAACTCCAGTCAC
+      -G AAGCAGTGGTATCAACGCAGAGT
+      -G T{20}
+      -a CCCATGTACTCTGCGTTGATACCACTGCTT
+      -A CCCATGTACTCTGCGTTGATACCACTGCTT
+      -a TCAGACGTGTGCTCTTCCGATCT
+      -A TCAGACGTGTGCTCTTCCGATCT
+
+star:
+  sjdb_overhang: 149
+  limit_genome_generate_ram: 50000000000
+  out_filter_score_min_over_lread: 0.3
+  out_filter_match_nmin_over_lread: 0.3
+  out_filter_match_nmin: 30

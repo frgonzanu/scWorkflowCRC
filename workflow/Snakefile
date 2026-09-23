@@ -1,0 +1,467 @@
+import re
+from pathlib import Path
+
+import pandas as pd
+
+from snakemake.exceptions import WorkflowError
+from snakemake.utils import min_version, validate
+
+
+min_version("9.0")
+
+configfile:
+    workflow.source_path("../config/config.yaml")
+
+
+validate(
+    config,
+    workflow.source_path("schemas/config.schema.yaml"),
+)
+
+
+def root_source_path(path):
+    path = Path(path)
+    if path.is_absolute():
+        return str(path)
+    return workflow.source_path(f"../{path.as_posix()}")
+
+
+SAMPLESHEET = root_source_path(config["samplesheet"])
+
+samples = pd.read_csv(
+    SAMPLESHEET,
+    sep="\t",
+    dtype=str,
+).fillna("")
+
+validate(
+    samples,
+    workflow.source_path("schemas/samples.schema.yaml"),
+)
+
+if samples["sample"].duplicated().any():
+    duplicated = samples.loc[
+        samples["sample"].duplicated(), "sample"
+    ].tolist()
+    raise WorkflowError(
+        f"Duplicate sample IDs in sample sheet: {duplicated}"
+    )
+
+unsupported_layout = samples.loc[
+    samples["layout"] != "PAIRED",
+    ["sample", "layout"],
+]
+
+if not unsupported_layout.empty:
+    details = ", ".join(
+        f"{row.sample}={row.layout}"
+        for row in unsupported_layout.itertuples()
+    )
+    raise WorkflowError(
+        "The original TFM preprocessing recipes are paired-end. "
+        f"Unsupported layout(s): {details}"
+    )
+
+samples = samples.set_index("sample", drop=False)
+
+SAMPLES = samples.index.tolist()
+PROTOCOL = samples["protocol"].to_dict()
+R1_URL = samples["r1_url"].to_dict()
+R1_MD5 = samples["r1_md5"].str.lower().to_dict()
+R2_URL = samples["r2_url"].to_dict()
+R2_MD5 = samples["r2_md5"].str.lower().to_dict()
+
+
+wildcard_constraints:
+    sample="[SED]RR[0-9]+",
+    mate="[12]"
+
+
+RAW_FASTQC_ZIPS = expand(
+    "results/qc/raw/{sample}_{mate}_fastqc.zip",
+    sample=SAMPLES,
+    mate=["1", "2"],
+)
+
+TRIMMED_FASTQC_ZIPS = expand(
+    "results/qc/trimmed/{sample}_{mate}.trim_fastqc.zip",
+    sample=SAMPLES,
+    mate=["1", "2"],
+)
+
+CUTADAPT_LOGS = expand(
+    "results/logs/cutadapt/{sample}.log",
+    sample=SAMPLES,
+)
+
+STAR_COUNTS = expand(
+    "results/star/{sample}/ReadsPerGene.out.tab",
+    sample=SAMPLES,
+)
+
+STAR_FINAL_LOGS = expand(
+    "results/star/{sample}/Log.final.out",
+    sample=SAMPLES,
+)
+
+
+rule all:
+    input:
+        "results/counts/counts_matrix_unstranded.tsv",
+        "results/multiqc/multiqc_report.html",
+
+
+localrule download_fastqs:
+    output:
+        r1=temp("data/raw/{sample}_1.fastq.gz"),
+        r2=temp("data/raw/{sample}_2.fastq.gz"),
+    params:
+        r1_url=lambda wc: R1_URL[wc.sample],
+        r1_md5=lambda wc: R1_MD5[wc.sample],
+        r2_url=lambda wc: R2_URL[wc.sample],
+        r2_md5=lambda wc: R2_MD5[wc.sample],
+    log:
+        "results/logs/download/{sample}.log"
+    resources:
+        ena_conn=1,
+        runtime=180,
+        mem_mb=1000,
+    conda:
+        "envs/download.yaml"
+    shell:
+        r"""
+        set -euo pipefail
+
+        mkdir -p data/raw/.partial results/logs/download
+
+        partial_dir="data/raw/.partial/{wildcards.sample}"
+        mkdir -p "$partial_dir"
+
+        download_one() {{
+            url="$1"
+            expected_md5="$2"
+            final_path="$3"
+
+            filename="$(basename "$url")"
+            partial_path="$partial_dir/$filename"
+
+            echo "Downloading $url" >> {log}
+
+            wget \
+              --continue \
+              --tries=5 \
+              --timeout=30 \
+              --waitretry=5 \
+              --directory-prefix="$partial_dir" \
+              "$url" \
+              >> {log} 2>&1
+
+            actual_md5="$(md5sum "$partial_path" | awk '{{print $1}}')"
+
+            if [[ "$actual_md5" != "$expected_md5" ]]; then
+                echo "MD5 mismatch: $partial_path" >> {log}
+                echo "expected=$expected_md5 actual=$actual_md5" >> {log}
+                rm -f "$partial_path"
+                exit 1
+            fi
+
+            mv "$partial_path" "$final_path"
+        }}
+
+        download_one "{params.r1_url}" "{params.r1_md5}" "{output.r1}"
+        download_one "{params.r2_url}" "{params.r2_md5}" "{output.r2}"
+
+        rmdir "$partial_dir" 2>/dev/null || true
+        """
+
+
+rule fastqc_raw:
+    input:
+        "data/raw/{sample}_{mate}.fastq.gz"
+    output:
+        html="results/qc/raw/{sample}_{mate}_fastqc.html",
+        zip="results/qc/raw/{sample}_{mate}_fastqc.zip",
+    log:
+        "results/logs/fastqc/raw/{sample}_{mate}.log"
+    threads: 1
+    resources:
+        mem_mb=2000,
+        runtime=30,
+    conda:
+        "envs/fastqc.yaml"
+    shell:
+        r"""
+        mkdir -p results/qc/raw results/logs/fastqc/raw
+        fastqc \
+          --threads {threads} \
+          --outdir results/qc/raw \
+          {input} \
+          > {log} 2>&1
+        """
+
+
+rule cutadapt:
+    input:
+        r1="data/raw/{sample}_1.fastq.gz",
+        r2="data/raw/{sample}_2.fastq.gz",
+    output:
+        r1="results/trimmed/{sample}_1.trim.fastq.gz",
+        r2="results/trimmed/{sample}_2.trim.fastq.gz",
+    params:
+        protocol=lambda wc: PROTOCOL[wc.sample],
+        adapters=lambda wc: config["cutadapt"][PROTOCOL[wc.sample]][
+            "adapters"
+        ],
+        times=config["cutadapt"]["times"],
+        quality=config["cutadapt"]["quality_cutoff"],
+        error_rate=config["cutadapt"]["error_rate"],
+        overlap=config["cutadapt"]["overlap"],
+        minimum_length=config["cutadapt"]["minimum_length"],
+    log:
+        "results/logs/cutadapt/{sample}.log"
+    threads: 6
+    resources:
+        mem_mb=4000,
+        runtime=60,
+    conda:
+        "envs/cutadapt.yaml"
+    shell:
+        r"""
+        mkdir -p results/trimmed results/logs/cutadapt
+
+        echo "protocol={params.protocol}" > {log}
+
+        cutadapt \
+          {params.adapters} \
+          --times {params.times} \
+          -q {params.quality} \
+          -e {params.error_rate} \
+          --overlap {params.overlap} \
+          --minimum-length {params.minimum_length} \
+          -j {threads} \
+          -o {output.r1} \
+          -p {output.r2} \
+          {input.r1} {input.r2} \
+          >> {log} 2>&1
+        """
+
+
+rule fastqc_trimmed:
+    input:
+        "results/trimmed/{sample}_{mate}.trim.fastq.gz"
+    output:
+        html="results/qc/trimmed/{sample}_{mate}.trim_fastqc.html",
+        zip="results/qc/trimmed/{sample}_{mate}.trim_fastqc.zip",
+    log:
+        "results/logs/fastqc/trimmed/{sample}_{mate}.log"
+    threads: 1
+    resources:
+        mem_mb=2000,
+        runtime=30,
+    conda:
+        "envs/fastqc.yaml"
+    shell:
+        r"""
+        mkdir -p results/qc/trimmed results/logs/fastqc/trimmed
+        fastqc \
+          --threads {threads} \
+          --outdir results/qc/trimmed \
+          {input} \
+          > {log} 2>&1
+        """
+
+
+localrule download_reference:
+    output:
+        fasta_gz=temp("resources/reference/genome.fa.gz"),
+        gtf_gz=temp("resources/reference/genes_ann.gtf.gz"),
+    params:
+        fasta_url=config["reference"]["fasta_url"],
+        gtf_url=config["reference"]["gtf_url"],
+    log:
+        "results/logs/reference/download.log"
+    resources:
+        runtime=180,
+        mem_mb=1000,
+    conda:
+        "envs/download.yaml"
+    shell:
+        r"""
+        set -euo pipefail
+
+        mkdir -p resources/reference/.partial results/logs/reference
+
+        download_reference() {{
+            url="$1"
+            final_path="$2"
+
+            filename="$(basename "$url")"
+
+            wget \
+              --continue \
+              --tries=5 \
+              --timeout=30 \
+              --waitretry=5 \
+              --directory-prefix=resources/reference/.partial \
+              "$url" \
+              >> {log} 2>&1
+
+            partial_path="resources/reference/.partial/$filename"
+
+            gzip -t "$partial_path"
+            mv "$partial_path" "$final_path"
+        }}
+
+        download_reference "{params.fasta_url}" "{output.fasta_gz}"
+        download_reference "{params.gtf_url}" "{output.gtf_gz}"
+        """
+
+
+rule unpack_reference:
+    input:
+        fasta_gz="resources/reference/genome.fa.gz",
+        gtf_gz="resources/reference/genes_ann.gtf.gz",
+    output:
+        fasta=temp("resources/reference/genome.fa"),
+        gtf=temp("resources/reference/genes_ann.gtf"),
+    resources:
+        mem_mb=1000,
+        runtime=30,
+    conda:
+        "envs/download.yaml"
+    shell:
+        r"""
+        gzip -cd {input.fasta_gz} > {output.fasta}
+        gzip -cd {input.gtf_gz} > {output.gtf}
+        """
+
+
+rule star_index:
+    input:
+        fasta="resources/reference/genome.fa",
+        gtf="resources/reference/genes_ann.gtf",
+    output:
+        index=directory("resources/reference/star_index_hg38")
+    log:
+        "results/logs/star/index.log"
+    threads: 16
+    resources:
+        mem_mb=55000,
+        runtime=240,
+    params:
+        sjdb_overhang=config["star"]["sjdb_overhang"],
+        ram=config["star"]["limit_genome_generate_ram"],
+    conda:
+        "envs/star.yaml"
+    shell:
+        r"""
+        mkdir -p {output.index} results/logs/star
+
+        STAR \
+          --runThreadN {threads} \
+          --runMode genomeGenerate \
+          --genomeDir {output.index} \
+          --genomeFastaFiles {input.fasta} \
+          --sjdbGTFfile {input.gtf} \
+          --sjdbOverhang {params.sjdb_overhang} \
+          --limitGenomeGenerateRAM {params.ram} \
+          > {log} 2>&1
+        """
+
+
+rule star_align:
+    input:
+        index="resources/reference/star_index_hg38",
+        r1="results/trimmed/{sample}_1.trim.fastq.gz",
+        r2="results/trimmed/{sample}_2.trim.fastq.gz",
+    output:
+        counts="results/star/{sample}/ReadsPerGene.out.tab",
+        final_log="results/star/{sample}/Log.final.out",
+    log:
+        "results/star/{sample}/run.log"
+    threads: 8
+    resources:
+        mem_mb=40000,
+        runtime=180,
+    params:
+        output_dir=lambda wc: f"results/star/{wc.sample}",
+        score=config["star"]["out_filter_score_min_over_lread"],
+        match_ratio=config["star"][
+            "out_filter_match_nmin_over_lread"
+        ],
+        match_min=config["star"]["out_filter_match_nmin"],
+    conda:
+        "envs/star.yaml"
+    shell:
+        r"""
+        set -euo pipefail
+
+        mkdir -p {params.output_dir}
+
+        tmp_root="${{TMPDIR:-/tmp}}"
+        star_tmp="${{tmp_root%/}}/star_{wildcards.sample}_${{SLURM_JOB_ID:-local}}_$$"
+
+        rm -rf "$star_tmp"
+        trap 'rm -rf "$star_tmp"' EXIT
+
+        STAR \
+          --runThreadN {threads} \
+          --genomeDir {input.index} \
+          --readFilesIn {input.r1} {input.r2} \
+          --readFilesCommand zcat \
+          --outFileNamePrefix {params.output_dir}/ \
+          --outTmpDir "$star_tmp" \
+          --outSAMtype None \
+          --quantMode GeneCounts \
+          --outFilterScoreMinOverLread {params.score} \
+          --outFilterMatchNminOverLread {params.match_ratio} \
+          --outFilterMatchNmin {params.match_min} \
+          > {log} 2>&1
+        """
+
+
+rule merge_star_counts:
+    input:
+        STAR_COUNTS
+    output:
+        "results/counts/counts_matrix_unstranded.tsv"
+    log:
+        "results/logs/counts/merge.log"
+    resources:
+        mem_mb=4000,
+        runtime=30,
+    conda:
+        "envs/python.yaml"
+    script:
+        "scripts/merge_star_counts.py"
+
+
+rule multiqc:
+    input:
+        raw_fastqc=RAW_FASTQC_ZIPS,
+        trimmed_fastqc=TRIMMED_FASTQC_ZIPS,
+        cutadapt=CUTADAPT_LOGS,
+        star=STAR_FINAL_LOGS,
+    output:
+        "results/multiqc/multiqc_report.html"
+    log:
+        "results/logs/multiqc/multiqc.log"
+    resources:
+        mem_mb=4000,
+        runtime=30,
+    conda:
+        "envs/multiqc.yaml"
+    shell:
+        r"""
+        mkdir -p results/multiqc results/logs/multiqc
+
+        multiqc \
+          {input.raw_fastqc} \
+          {input.trimmed_fastqc} \
+          {input.cutadapt} \
+          {input.star} \
+          --force \
+          --filename multiqc_report.html \
+          --outdir results/multiqc \
+          > {log} 2>&1
+        """

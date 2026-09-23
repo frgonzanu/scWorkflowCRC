@@ -1,1 +1,383 @@
-# scWorkflowCRC
+# GSE97693 preprocessing workflow with Snakemake
+
+A reproducible **Snakemake refactoring of the preprocessing stage used in my MSc thesis** on single-cell RNA-seq data from colorectal cancer.
+
+The biological analysis is based on the public dataset **GSE97693**. The original preprocessing was implemented with Bash and Python scripts; this repository reorganises the same scientific steps into a dependency-aware workflow with validation, pinned software environments, explicit resources and optional SLURM execution.
+
+**Original thesis repository:**  
+https://github.com/frgonzanu/TFM
+
+## Workflow
+
+```text
+GSE97693 SRA accessions
+        │
+        ▼
+ENA metadata query
+(layout · URLs · MD5)
+        │
+        ▼
+FASTQ download + checksum
+        │
+        ├──────────────► FastQC (raw)
+        │
+        ▼
+protocol-aware Cutadapt
+   ┌───────────┬────────────┐
+   │ Tang-like │ Smart-seq2 │
+   └─────┬─────┴─────┬──────┘
+         │           │
+         └─────┬─────┘
+               ▼
+       FastQC (trimmed)
+               │
+               ▼
+ GENCODE v38 / GRCh38
+               │
+               ▼
+          STAR index
+               │
+               ▼
+        STAR GeneCounts
+               │
+               ▼
+   ReadsPerGene.out.tab
+               │
+               ▼
+counts_matrix_unstranded.tsv
+               │
+               └────────────► MultiQC
+```
+
+## Relationship with the thesis
+
+The original preprocessing scripts in the TFM repository covered:
+
+1. FASTQ download
+2. protocol-specific Cutadapt trimming
+3. GENCODE v38 / GRCh38 reference preparation
+4. STAR index generation
+5. STAR alignment with `--quantMode GeneCounts`
+6. construction of the unstranded count matrix
+
+This repository preserves the scientific parameters of those steps while improving workflow engineering around them.
+
+### Intentional engineering changes
+
+A few changes are deliberate and are **not presented as part of the original thesis pipeline**:
+
+- FastQC is run before and after trimming.
+- MultiQC aggregates QC and tool logs.
+- ENA metadata are queried programmatically and MD5 checksums are verified.
+- Raw FASTQ files and compressed reference files are marked as temporary Snakemake outputs.
+- STAR BAM output is disabled because downstream thesis analysis used `ReadsPerGene.out.tab`, not BAM files.
+- STAR temporary files are written to `$TMPDIR` when available.
+- sample-sheet and workflow configuration are schema-validated.
+
+## Repository layout
+
+The repository follows the structure recommended by current Snakemake documentation:
+
+```text
+.
+├── README.md
+├── LICENSE
+├── environment.yml
+├── config/
+│   ├── accessions.tsv
+│   ├── config.yaml
+│   └── samples.tsv              # generated from ENA, not committed
+├── workflow/
+│   ├── Snakefile
+│   ├── envs/
+│   ├── schemas/
+│   └── scripts/
+├── profiles/
+│   └── slurm/
+├── scripts/
+│   └── generate_conda_locks.sh
+└── tests/
+```
+
+## 1. Prepare the Snakemake environment
+
+```bash
+conda env create -f environment.yml
+conda activate gse97693-snakemake
+```
+
+This repository targets **Snakemake 9** and uses the current deployment syntax:
+
+```bash
+--software-deployment-method conda
+```
+
+rather than the deprecated `--use-conda`.
+
+## 2. Build an ENA-resolved sample sheet
+
+The committed accession table contains real runs from the thesis dataset and their trimming protocol:
+
+```text
+config/accessions.tsv
+```
+
+Resolve layout, FASTQ URLs and MD5 checksums directly from ENA:
+
+```bash
+python workflow/scripts/query_ena_metadata.py \
+  --accessions config/accessions.tsv \
+  --output config/samples.tsv
+```
+
+The generated table contains:
+
+```text
+sample
+protocol
+layout
+r1_url
+r1_md5
+r2_url
+r2_md5
+```
+
+The workflow currently supports the **paired-end layout used by the original preprocessing scripts**. If ENA reports a single-end run, validation stops before jobs are launched instead of failing later with a missing `_2.fastq.gz`.
+
+## 3. Inspect the workflow
+
+```bash
+snakemake --dry-run --cores 1
+```
+
+Optional DAG:
+
+```bash
+snakemake --dag | dot -Tsvg > dag.svg
+```
+
+## 4. Run locally
+
+Limit concurrent ENA transfers explicitly:
+
+```bash
+snakemake \
+  --cores 8 \
+  --resources ena_conn=4 \
+  --software-deployment-method conda
+```
+
+FASTQ and reference-download rules are also defined as `localrule`s so they are not submitted to compute nodes by the SLURM executor.
+
+## ENA download behaviour
+
+FASTQ download metadata are obtained from the ENA file-report API.
+
+Downloads use:
+
+```text
+wget --continue
+--tries 5
+--timeout 30
+--waitretry 5
+```
+
+Partial files are retained under:
+
+```text
+data/raw/.partial/
+```
+
+so interrupted transfers can actually resume. A file is moved to its final Snakemake output path only after its ENA MD5 checksum passes.
+
+## Disk usage
+
+The workflow is intentionally conservative with disk:
+
+- raw FASTQ files are `temp()` outputs
+- downloaded `.fa.gz` and `.gtf.gz` files are `temp()`
+- decompressed FASTA/GTF files are `temp()` after STAR index creation
+- BAM files are **not generated by default**
+
+STAR is run with:
+
+```text
+--outSAMtype None
+--quantMode GeneCounts
+```
+
+because the downstream TFM analysis starts from gene counts.
+
+## STAR temporary directory
+
+Each alignment gets a unique temporary directory under `$TMPDIR` when available:
+
+```text
+$TMPDIR/star_<sample>_...
+```
+
+This prevents stale `_STARtmp` directories from blocking job retries.
+
+## SLURM
+
+An example Snakemake 9 SLURM profile is available in:
+
+```text
+profiles/slurm/
+```
+
+Before use, edit:
+
+```yaml
+slurm_account: "CHANGE_ME"
+slurm_partition: "CHANGE_ME"
+```
+
+The profile requests:
+
+```text
+STAR index:      55 GB
+STAR alignment:  40 GB
+```
+
+The alignment value is deliberately above the memory footprint normally required to load a human STAR index.
+
+Run with:
+
+```bash
+snakemake --profile profiles/slurm
+```
+
+The profile already enables Conda deployment.
+
+## Sample-sheet validation
+
+The sample sheet is validated with `snakemake.utils.validate()` and a JSON schema.
+
+Validation checks include:
+
+- run-accession syntax
+- supported protocols
+- `PAIRED` / `SINGLE` layout values
+- HTTPS FASTQ URLs
+- 32-character MD5 hashes
+- required R2 metadata for paired-end runs
+
+Duplicate sample IDs are also rejected.
+
+## Cutadapt parameters and historical fidelity
+
+The trimming recipes intentionally preserve the parameters used in the original thesis scripts, including:
+
+```text
+-q 20,20
+-e 0.2
+--overlap 5
+--minimum-length 25
+--times 1
+```
+
+The Tang-associated recipe contains multiple overlapping adapter definitions, including short adapter motifs. Together with `-e 0.2` and a minimum overlap of 5 nt, these settings are relatively permissive and may increase the chance of spurious trimming.
+
+They are preserved here for **reproducibility of the original analysis**, not presented as universally recommended Cutadapt settings.
+
+A future version could compare the historical recipe against a simplified trimming strategy.
+
+## MultiQC
+
+MultiQC receives explicit workflow outputs as inputs:
+
+- raw FastQC ZIP files
+- trimmed FastQC ZIP files
+- Cutadapt logs
+- STAR `Log.final.out` files
+
+It does **not** recursively scan the entire `results/` directory, preventing stale files from previous runs from leaking into the report.
+
+## Count-matrix construction
+
+The original TFM script merged STAR `ReadsPerGene.out.tab` files.
+
+This version keeps the same strategy but:
+
+- gets the sample ID from the SRR-specific directory
+- removes STAR summary rows such as `N_unmapped`
+- writes a merge summary to the declared Snakemake log
+- checks for duplicate gene identifiers
+
+Final output:
+
+```text
+results/counts/counts_matrix_unstranded.tsv
+```
+
+This is designed to feed the downstream R analysis in the original TFM repository.
+
+## Reconstructing the full accession set
+
+The repository ships only a small real subset for practical testing.
+
+To rebuild the full protocol-labelled accession list from the original TFM repository:
+
+```bash
+python workflow/scripts/build_full_accessions.py \
+  --output config/accessions.full.tsv
+```
+
+Then resolve ENA metadata:
+
+```bash
+python workflow/scripts/query_ena_metadata.py \
+  --accessions config/accessions.full.tsv \
+  --output config/samples.tsv
+```
+
+The complete dataset is large; review storage, network and scheduler policies before executing it.
+
+## Software versions and lock files
+
+Direct dependencies are pinned to explicit versions in the Conda YAML files.
+
+A helper is included to generate fully solved `conda-lock` files for `linux-64`:
+
+```bash
+bash scripts/generate_conda_locks.sh
+```
+
+The generated lock files should be committed after solving them on a machine with access to the Conda/Bioconda channels.
+
+They are **not fabricated in this repository**: a valid lock file must contain the actual resolved package builds and hashes produced by the solver.
+
+## Original downstream analysis
+
+The count matrix was subsequently analysed using:
+
+- `SingleCellExperiment`
+- cell-level QC
+- normalisation
+- Harmony batch correction
+- PCA / UMAP / t-SNE
+- clustering and cell annotation
+- patient-aware pseudobulk analysis with `edgeR`
+- sPLS-DA
+- enrichment analysis
+- PROGENy / DoRothEA
+- exploratory scVI / LDVAE modelling
+
+See:
+
+https://github.com/frgonzanu/TFM
+
+## Scope
+
+This repository is a workflow-engineering and reproducibility refactoring of a real scientific analysis.
+
+It is not presented as a production replacement for community-maintained workflows such as nf-core pipelines.
+
+## Author
+
+**Francisco M. González Nuño**
+
+Biomedical Engineering · Bioinformatics & Biostatistics · Scientific Computing
+
+[GitHub](https://github.com/frgonzanu) · [LinkedIn](https://www.linkedin.com/in/francisco-manuel-gonzalez-nuno/)

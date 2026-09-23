@@ -1,0 +1,13 @@
+name: gse97693-snakemake-slurm
+
+channels:
+  - conda-forge
+  - bioconda
+  - nodefaults
+
+dependencies:
+  - python=3.11.10
+  - snakemake-minimal=9.24.0
+  - snakemake-executor-plugin-slurm=2.8.0
+  - pandas=2.3.2
+  - jsonschema=4.25.1

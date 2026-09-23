@@ -1,0 +1,31 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+type: object
+properties:
+  samplesheet:
+    type: string
+  reference:
+    type: object
+    required: [fasta_url, gtf_url]
+  cutadapt:
+    type: object
+    required:
+      - times
+      - quality_cutoff
+      - error_rate
+      - overlap
+      - minimum_length
+      - tang
+      - smartseq2
+  star:
+    type: object
+    required:
+      - sjdb_overhang
+      - limit_genome_generate_ram
+      - out_filter_score_min_over_lread
+      - out_filter_match_nmin_over_lread
+      - out_filter_match_nmin
+required:
+  - samplesheet
+  - reference
+  - cutadapt
+  - star
